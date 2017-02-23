@@ -1,3 +1,4 @@
+# encoding: utf-8
 # (C) Datadog, Inc. 2010-2016
 # All rights reserved
 # Licensed under Simplified BSD License (see LICENSE)
@@ -7,16 +8,17 @@ from hashlib import md5
 import logging
 import re
 import zlib
-import unicodedata
-
+import sys
+import locale
 # 3p
 import requests
 import simplejson as json
 
 # project
 from config import get_version
-
+from utils.platform import get_os
 from utils.proxy import set_no_proxy_settings
+
 set_no_proxy_settings()
 
 # urllib3 logs a bunch of stuff at the info level
@@ -29,83 +31,36 @@ control_chars = ''.join(map(unichr, range(0, 32) + range(127, 160)))
 control_char_re = re.compile('[%s]' % re.escape(control_chars))
 
 
-def remove_control_chars(s, log):
-    if isinstance(s, str):
-        sanitized = control_char_re.sub('', s)
-    elif isinstance(s, unicode):
-        sanitized = ''.join(['' if unicodedata.category(c) in ['Cc','Cf'] else c
-                            for c in u'{}'.format(s)])
-    if sanitized != s:
-        log.warning('Removed control chars from string: ' + s)
-    return sanitized
+def remove_control_chars(s):
+    return control_char_re.sub('', s)
 
-def remove_undecodable_chars(s, log):
-    sanitized = s
-    if isinstance(s, str):
-        try:
-            s.decode('utf8')
-        except UnicodeDecodeError:
-            sanitized = s.decode('utf8', errors='ignore')
-            log.warning(u'Removed undecodable chars from string: ' + s.decode('utf8', errors='replace'))
-    return sanitized
-
-def sanitize_payload(item, log, sanitize_func):
-    if isinstance(item, dict):
-        newdict = {}
-        for k, v in item.iteritems():
-            newval = sanitize_payload(v, log, sanitize_func)
-            newkey = sanitize_func(k, log)
-            newdict[newkey] = newval
-        return newdict
-    if isinstance(item, list):
-        newlist = []
-        for listitem in item:
-            newlist.append(sanitize_payload(listitem, log, sanitize_func))
-        return newlist
-    if isinstance(item, tuple):
-        newlist = []
-        for listitem in item:
-            newlist.append(sanitize_payload(listitem, log, sanitize_func))
-        return tuple(newlist)
-    if isinstance(item, basestring):
-        return sanitize_func(item, log)
-
-    return item
 
 def http_emitter(message, log, agentConfig, endpoint):
     "Send payload"
     url = agentConfig['dd_url']
-
-    log.debug('http_emitter: attempting postback to ' + url)
-
-    # Post back the data
+    print message
+    supported_encoding = ('utf-8', 'gb2312', 'gbk', 'iso-8859-1', 'latin-1', 'gb18030', 'cp936', 'cp1252')
+    sys_encoding = sys.getfilesystemencoding().lower()
+    if get_os() == 'windows':
+        sys_encoding = locale.getpreferredencoding().lower()
     try:
+        if sys_encoding in supported_encoding:
+            pass
         try:
-            payload = json.dumps(message)
+            payload = json.dumps(message, encoding=sys_encoding)
         except UnicodeDecodeError:
-            newmessage = sanitize_payload(message, log, remove_control_chars)
-            try:
-                payload = json.dumps(newmessage)
-            except UnicodeDecodeError:
-                log.info('Removing undecodable characters from payload')
-                newmessage = sanitize_payload(newmessage, log, remove_undecodable_chars)
-                payload = json.dumps(newmessage)
-    except UnicodeDecodeError as ude:
-        log.error('http_emitter: Unable to convert message to json %s', ude)
-        # early return as we can't actually process the message
-        return
-    except RuntimeError as rte:
-        log.error('http_emitter: runtime error dumping message to json %s', rte)
-        # early return as we can't actually process the message
-        return
-    except Exception as e:
-        log.error('http_emitter: unknown exception processing message %s', e)
-        return
+            payload = json.dumps(message, encoding='utf-8')
+    except UnicodeDecodeError:
+        try:
+            message = remove_control_chars(message)
+        except:
+            pass
+        payload = json.dumps(message)
 
     zipped = zlib.compress(payload)
 
     log.debug("payload_size=%d, compressed_size=%d, compression_ratio=%.3f"
-              % (len(payload), len(zipped), float(len(payload))/float(len(zipped))))
+              % (len(payload), len(zipped), float(len(payload)) / float(len(zipped))))
 
     apiKey = message.get('apiKey', None)
     if not apiKey:
