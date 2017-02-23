@@ -163,6 +163,7 @@ class RabbitMQ(AgentCheck):
 
         except RabbitMQException as e:
             msg = "Error executing check: {}".format(e)
+            self.warning(msg)
             self.service_check('rabbitmq.status', AgentCheck.CRITICAL, message=msg)
             self.log.error(msg)
 
