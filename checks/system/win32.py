@@ -1,12 +1,14 @@
+# enconding=utf8
 # (C) Datadog, Inc. 2010-2016
 # All rights reserved
 # Licensed under Simplified BSD License (see LICENSE)
 
 # project
 from checks import Check
-
+from utils.hostname import get_hostname
 # 3rd party
 import uptime
+
 try:
     import psutil
 except ImportError:
@@ -28,6 +30,8 @@ from utils.timeout import TimeoutException
 # Device WMI drive types
 class DriveType(object):
     UNKNOWN, NOROOT, REMOVEABLE, LOCAL, NETWORK, CD, RAM = (0, 1, 2, 3, 4, 5, 6)
+
+
 B2MB = float(1048576)
 KB2MB = B2KB = float(1024)
 
@@ -40,7 +44,6 @@ def should_ignore_disk(name, blacklist_re):
 class Processes(Check):
     def __init__(self, logger):
         Check.__init__(self, logger)
-
         # Sampler(s)
         self.wmi_sampler = WMISampler(
             logger,
@@ -50,7 +53,94 @@ class Processes(Check):
 
         self.gauge('system.proc.queue_length')
         self.gauge('system.proc.count')
+        self.process_cache = {}
 
+    def _get_pids(self):
+        pids = set()
+        for proc in psutil.process_iter():
+            if proc.pid == 0 or proc.pid == 4:
+                continue
+            pids.add(proc.pid)
+        return pids
+
+    def _get_metrics(self):
+        try:
+            self.wmi_sampler.sample()
+        except TimeoutException:
+            self.logger.warning(u'Timeout while querying Win32_PerfRawData_PerfOS_System WMI class. Processes metrics will be returned at next iteration.')
+            return []
+
+        if not len(self.wmi_sampler):
+            self.logger.warning(
+                'Missing Win32_PerfRawData_PerfOS_System WMI class. No process metrics will be returned.')
+            return []
+
+        os = self.wmi_sampler[0]
+        processor_queue_length = os.get('ProcessorQueueLength')
+        processes = os.get('Processes')
+        if processor_queue_length is not None:
+            self.save_sample('system.proc.queue_length', processor_queue_length)
+        if processes is not None:
+            self.save_sample('system.proc.count', processes)
+        return self.get_metrics()
+
+    def _get_processes(self):
+        processes = []
+        pids = self._get_pids()
+        cached_pids = set(self.process_cache.keys())
+        pids_to_remove = cached_pids - pids
+        for pid in pids_to_remove:
+            del self.process_cache[pid]
+        cpu_count = psutil.cpu_count()
+        for pid in pids:
+            try:
+                if pid not in self.process_cache or not self.process_cache[pid].is_running():
+                    try:
+                        self.process_cache[pid] = psutil.Process(pid)
+                    except psutil.NoSuchProcess:
+                        self.warning('Process %s disappeared while scanning' % pid)
+                        continue
+                p = self.process_cache[pid]
+                user = p.username()
+                cpu_percent = p.cpu_percent() / cpu_count
+                memory_percent = round(p.memory_percent(), 2)
+                meminfo = p.memory_info()
+                command = p.name()
+                processes.append([
+                    user,
+                    pid,
+                    cpu_percent,
+                    memory_percent,
+                    meminfo.vms,
+                    meminfo.rss,
+                    None,
+                    None,
+                    None,
+                    None,
+                    command])
+                continue
+            except psutil.NoSuchProcess:
+                self.logger.warning('Process disappeared while scanning')
+                continue
+            except psutil.AccessDenied:
+                self.logger.debug('Access denied to process with PID %s' % pid)
+                continue
+        return processes
+
+    def check(self, agentConfig):
+        metrics = self._get_metrics()
+        processes = self._get_processes()
+        self.logger.debug('processes: %s' % processes)
+        return {
+            'metrics': metrics,
+            'processes': {
+                'processes': processes,
+                'apiKey': agentConfig.get('api_key'),
+                'host': get_hostname(agentConfig)
+            }
+        }
+
+    '''
     def check(self, agentConfig):
         try:
             self.wmi_sampler.sample()
@@ -63,7 +153,7 @@ class Processes(Check):
 
         if not (len(self.wmi_sampler)):
             self.logger.warning('Missing Win32_PerfRawData_PerfOS_System WMI class.'
-                             ' No process metrics will be returned.')
+                                ' No process metrics will be returned.')
             return []
 
         os = self.wmi_sampler[0]
@@ -76,6 +166,7 @@ class Processes(Check):
             self.save_sample('system.proc.count', processes)
 
         return self.get_metrics()
+    '''
 
 
 class Memory(Check):
@@ -131,7 +222,7 @@ class Memory(Check):
 
         if not (len(self.os_wmi_sampler)):
             self.logger.warning('Missing Win32_OperatingSystem WMI class.'
-                             ' No memory metrics will be returned.')
+                                ' No memory metrics will be returned.')
             return []
 
         os = self.os_wmi_sampler[0]
@@ -201,20 +292,65 @@ class Cpu(Check):
     def __init__(self, logger):
         Check.__init__(self, logger)
 
+        # Sampler(s)
+        self.wmi_sampler = WMISampler(
+            logger,
+            "Win32_PerfRawData_PerfOS_Processor",
+            ["Name", "PercentInterruptTime"]
+        )
+
         self.counter('system.cpu.user')
         self.counter('system.cpu.idle')
+        self.gauge('system.cpu.interrupt')
         self.counter('system.cpu.system')
-        self.counter('system.cpu.interrupt')
 
     def check(self, agentConfig):
+        try:
+            self.wmi_sampler.sample()
+        except TimeoutException:
+            self.logger.warning(
+                u"Timeout while querying Win32_PerfRawData_PerfOS_Processor WMI class."
+                u" CPU metrics will be returned at next iteration."
+            )
+            return []
+
+        if not (len(self.wmi_sampler)):
+            self.logger.warning('Missing Win32_PerfRawData_PerfOS_Processor WMI class.'
+                                ' No CPU metrics will be returned')
+            return []
+
+        cpu_interrupt = self._average_metric(self.wmi_sampler, 'PercentInterruptTime')
+        if cpu_interrupt is not None:
+            self.save_sample('system.cpu.interrupt', cpu_interrupt)
+
         cpu_percent = psutil.cpu_times()
 
         self.save_sample('system.cpu.user', 100 * cpu_percent.user / psutil.cpu_count())
         self.save_sample('system.cpu.idle', 100 * cpu_percent.idle / psutil.cpu_count())
         self.save_sample('system.cpu.system', 100 * cpu_percent.system / psutil.cpu_count())
-        self.save_sample('system.cpu.interrupt', 100 * cpu_percent.interrupt / psutil.cpu_count())
 
         return self.get_metrics()
+
+    def _average_metric(self, sampler, wmi_prop):
+        ''' Sum all of the values of a metric from a WMI class object, excluding
+            the value for "_Total"
+        '''
+        val = 0
+        counter = 0
+        for wmi_object in sampler:
+            if wmi_object['Name'] == '_Total':
+                # Skip the _Total value
+                continue
+
+            wmi_prop_value = wmi_object.get(wmi_prop)
+            if wmi_prop_value is not None:
+                counter += 1
+                val += float(wmi_prop_value)
+
+        if counter > 0:
+            return val / counter
+
+        return val
 
 
 class Network(Check):
@@ -243,7 +379,7 @@ class Network(Check):
 
         if not (len(self.wmi_sampler)):
             self.logger.warning('Missing Win32_PerfRawData_Tcpip_NetworkInterface WMI class.'
-                             ' No network metrics will be returned')
+                                ' No network metrics will be returned')
             return []
 
         for iface in self.wmi_sampler:
@@ -291,7 +427,7 @@ class IO(Check):
 
         if not (len(self.wmi_sampler)):
             self.logger.warning('Missing Win32_PerfRawData_PerfDisk_LogicalDiskUnable WMI class.'
-                             ' No I/O metrics will be returned.')
+                                ' No I/O metrics will be returned.')
             return []
 
         blacklist_re = agentConfig.get('device_blacklist_re', None)
