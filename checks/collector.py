@@ -294,11 +294,18 @@ class Collector(object):
         # Run the system checks. Checks will depend on the OS
         if Platform.is_windows():
             # Win32 system checks
-            for check_name in ['memory', 'cpu', 'network', 'io', 'proc', 'system']:
-                try:
-                    metrics.extend(self._win32_system_checks[check_name].check(self.agentConfig))
+              try:
+                    metrics.extend(self._win32_system_checks['memory'].check(self.agentConfig))
+                    metrics.extend(self._win32_system_checks['cpu'].check(self.agentConfig))
+                    metrics.extend(self._win32_system_checks['network'].check(self.agentConfig))
+                    metrics.extend(self._win32_system_checks['io'].check(self.agentConfig))
+                    #metrics.extend(self._win32_system_checks['proc'].check(self.agentConfig))
+                    processes = self._win32_system_checks['proc'].check(self.agentConfig)
+                    metrics.extend(self._win32_system_checks['system'].check(self.agentConfig))
+                    payload.update({'processes': processes.get('processes')})
+                    metrics.extend(processes.get('metrics'))
                 except Exception:
-                    log.exception('Unable to get %s metrics', check_name)
+                    log.exception('Unable to fetch Windows system metrics.')
         else:
             # Unix system checks
             sys_checks = self._unix_system_checks
@@ -784,7 +791,7 @@ class Collector(object):
             if not Platform.is_windows():
                 command = "gohai"
             else:
-                command = "gohai\gohai.exe"
+                command = "gohai\\gohai.exe"
             output, err, _ = get_subprocess_output([command] + options, log)
             if err:
                 log.warning("GOHAI LOG | {0}".format(err))
