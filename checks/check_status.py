@@ -342,7 +342,7 @@ class CheckStatus(object):
         if self.init_failed_error:
             return STATUS_ERROR
         for instance_status in self.instance_statuses:
-            if instance_status.status == STATUS_ERROR:
+            if instance_status.status == STATUS_ERROR or instance_status.status == STATUS_WARNING:
                 return STATUS_ERROR
         return STATUS_OK
 
