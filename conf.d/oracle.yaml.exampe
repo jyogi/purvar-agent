@@ -23,6 +23,6 @@ instances:
   #    to this directory when starting/restarting the agent
   #       export LD_LIBRARY_PATH=/opt/oracle/instantclient_12_1
   #
-  - server: orcl
-    user: system
-    password: 1234
+  - server: myserver
+    user: username
+    password: password
